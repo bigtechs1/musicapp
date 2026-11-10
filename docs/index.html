@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>My Music</title>
+<meta name="theme-color" content="#0a0a0f">
+<link rel="manifest" href="./manifest.json">
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#eee;padding-bottom:90px;min-height:100vh}
+  header{padding:12px;position:sticky;top:0;background:#0a0a0f;z-index:10;border-bottom:1px solid #1a1a22}
+  .search{display:flex;gap:8px}
+  input{flex:1;padding:10px 14px;border-radius:22px;border:none;background:#1a1a22;color:#fff;outline:none;font-size:16px}
+  button{padding:10px 16px;border-radius:22px;border:none;background:#6c5ce7;color:#fff;font-weight:600;cursor:pointer;font-size:14px}
+  button:active{opacity:.7}
+  .tab{display:flex;gap:8px;margin-top:8px}
+  .tab button{background:#1a1a22;color:#888;flex:1;padding:8px;font-size:13px}
+  .tab button.active{background:#6c5ce7;color:#fff}
+  .item{display:flex;gap:10px;padding:10px 12px;cursor:pointer;align-items:center;border-bottom:1px solid #12121a}
+  .item:active{background:#15151c}
+  .item img{width:72px;height:54px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#1a1a22}
+  .item .info{flex:1;min-width:0}
+  .item .t{font-size:14px;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .item .m{font-size:12px;color:#888;margin-top:3px}
+  .fav{color:#ff6b81;font-size:22px;padding:6px 10px;background:none;min-width:auto}
+  #player{position:fixed;bottom:0;left:0;right:0;background:#12121a;border-top:1px solid #1a1a22;padding:8px 12px;display:none;align-items:center;gap:10px;z-index:20}
+  #player img{width:44px;height:44px;border-radius:6px;object-fit:cover;background:#1a1a22}
+  #player .info{flex:1;min-width:0}
+  #player .title{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #player .sub{font-size:11px;color:#888;margin-top:2px}
+  #player button{padding:8px 12px;font-size:14px;background:#6c5ce7}
+  #status{padding:30px 20px;text-align:center;color:#666;font-size:14px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="search">
+    <input id="q" placeholder="Search song..." autocomplete="off">
+    <button onclick="doSearch()">🔍</button>
+  </div>
+  <div class="tab">
+    <button id="tabSearch" class="active" onclick="switchTab('search')">Search</button>
+    <button id="tabFav" onclick="switchTab('fav')">Favorites</button>
+  </div>
+</header>
+
+<div id="list"><div id="status">Search a song to start 🎵</div></div>
+
+<div id="player">
+  <img id="pThumb" src="" alt="">
+  <div class="info">
+    <div class="title" id="pTitle">—</div>
+    <div class="sub" id="pSub">—</div>
+  </div>
+  <button id="pPlay" onclick="togglePlay()">⏸</button>
+  <button onclick="toggleFav()" id="pFav">♡</button>
+</div>
+
+<audio id="audio" preload="auto" crossorigin="anonymous"></audio>
+
+<script>
+/* =====================================================
+   ⚠️ CHANGE THIS LINE after you deploy the Cloudflare Worker (Step 4)
+   Replace YOURNAME with your Cloudflare subdomain.
+   ===================================================== */
+const PROXY = 'https://music-proxy.YOURNAME.workers.dev/?url=';
+/* ===================================================== */
+
+const API = 'https://api.azbry.com/api';
+const $ = id => document.getElementById(id);
+const audio = $('audio');
+
+let current = null;
+let queue = [];
+let queueIdx = 0;
+let tab = 'search';
+let lastResults = [];
+let favorites = JSON.parse(localStorage.getItem('favs') || '[]');
+
+const esc = s => String(s).replace(/[&<>"']/g, c => (
+  { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+));
+
+async function apiFetch(path) {
+  const url = PROXY + encodeURIComponent(API + path);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function isFav(v) { return favorites.some(f => f.videoId === v.videoId); }
+function saveFavs() { localStorage.setItem('favs', JSON.stringify(favorites)); }
+
+function switchTab(t) {
+  tab = t;
+  $('tabSearch').classList.toggle('active', t === 'search');
+  $('tabFav').classList.toggle('active', t === 'fav');
+  t === 'fav' ? renderFavs() : renderResults(lastResults);
+}
+
+function renderResults(list) {
+  if (!list || !list.length) {
+    $('list').innerHTML = '<div id="status">No results</div>';
+    return;
+  }
+  $('list').innerHTML = list.map((v, i) => `
+    <div class="item" onclick="playItem(${i})">
+      <img src="${v.thumbnail}" loading="lazy" alt="">
+      <div class="info">
+        <div class="t">${esc(v.title)}</div>
+        <div class="m">${esc(v.duration || '')} · ${esc(v.views || '')}</div>
+      </div>
+      <button class="fav" onclick="event.stopPropagation();favItem(${i})">
+        ${isFav(v) ? '♥' : '♡'}
+      </button>
+    </div>
+  `).join('');
+}
+
+function renderFavs() {
+  if (!favorites.length) {
+    $('list').innerHTML = '<div id="status">No favorites yet 💔</div>';
+    return;
+  }
+  $('list').innerHTML = favorites.map((v, i) => `
+    <div class="item" onclick="playFav(${i})">
+      <img src="${v.thumbnail}" loading="lazy" alt="">
+      <div class="info">
+        <div class="t">${esc(v.title)}</div>
+        <div class="m">${esc(v.duration || '')} · ${esc(v.views || '')}</div>
+      </div>
+      <button class="fav" onclick="event.stopPropagation();unfav(${i})">♥</button>
+    </div>
+  `).join('');
+}
+
+async function doSearch() {
+  const q = $('q').value.trim();
+  if (!q) return;
+  $('list').innerHTML = '<div id="status">Searching...</div>';
+  try {
+    const d = await apiFetch('/search/yts?q=' + encodeURIComponent(q));
+    lastResults = d.result || [];
+    renderResults(lastResults);
+  } catch (e) {
+    $('list').innerHTML = '<div id="status">Search failed: ' + esc(e.message) + '</div>';
+  }
+}
+
+function favItem(i) {
+  const v = lastResults[i];
+  if (isFav(v)) favorites = favorites.filter(f => f.videoId !== v.videoId);
+  else favorites.unshift(v);
+  saveFavs();
+  renderResults(lastResults);
+}
+
+function unfav(i) {
+  favorites.splice(i, 1);
+  saveFavs();
+  renderFavs();
+}
+
+function playItem(i) { queue = lastResults; queueIdx = i; playVideo(lastResults[i]); }
+function playFav(i)  { queue = favorites;   queueIdx = i; playVideo(favorites[i]); }
+
+async function playVideo(v) {
+  current = v;
+  $('player').style.display = 'flex';
+  $('pThumb').src = v.thumbnail;
+  $('pTitle').textContent = v.title;
+  $('pSub').textContent = 'Loading...';
+  updateFavBtn();
+
+  try {
+    const d = await apiFetch('/download/ytmp3?url=' + encodeURIComponent(v.url));
+    if (!d.result || !d.result.download) throw new Error('No download URL');
+    audio.src = d.result.download;
+    await audio.play();
+    $('pSub').textContent = 'Playing';
+    $('pPlay').textContent = '⏸';
+  } catch (e) {
+    $('pSub').textContent = 'Error: ' + e.message;
+  }
+}
+
+function updateFavBtn() {
+  $('pFav').textContent = current && isFav(current) ? '♥' : '♡';
+}
+
+function toggleFav() {
+  if (!current) return;
+  if (isFav(current)) favorites = favorites.filter(f => f.videoId !== current.videoId);
+  else favorites.unshift(current);
+  saveFavs();
+  updateFavBtn();
+  tab === 'fav' ? renderFavs() : renderResults(lastResults);
+}
+
+function togglePlay() {
+  if (audio.paused) { audio.play(); $('pPlay').textContent = '⏸'; }
+  else { audio.pause(); $('pPlay').textContent = '▶'; }
+}
+
+audio.addEventListener('ended', () => {
+  if (queueIdx + 1 < queue.length) {
+    queueIdx++;
+    playVideo(queue[queueIdx]);
+  } else {
+    $('pPlay').textContent = '▶';
+  }
+});
+
+audio.addEventListener('error', () => { $('pSub').textContent = 'Playback error'; });
+
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+</script>
+</body>
+</html>
